@@ -86,25 +86,30 @@ app.include_router(router)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """
-    Log all incoming requests
+    Log all incoming requests (except health checks)
     """
     start_time = asyncio.get_event_loop().time()
     
-    # Log request
-    logger.info("Request started", 
-               method=request.method,
-               url=str(request.url),
-               client=request.client.host if request.client else None)
+    # Skip logging for health check endpoints
+    is_health_check = str(request.url.path) in ["/health", "/api/v1/health"]
+    
+    # Log request (skip health checks)
+    if not is_health_check:
+        logger.info("Request started", 
+                   method=request.method,
+                   url=str(request.url),
+                   client=request.client.host if request.client else None)
     
     response = await call_next(request)
     
-    # Log response
-    process_time = asyncio.get_event_loop().time() - start_time
-    logger.info("Request completed",
-               method=request.method,
-               url=str(request.url),
-               status_code=response.status_code,
-               process_time=process_time)
+    # Log response (skip health checks)
+    if not is_health_check:
+        process_time = asyncio.get_event_loop().time() - start_time
+        logger.info("Request completed",
+                   method=request.method,
+                   url=str(request.url),
+                   status_code=response.status_code,
+                   process_time=process_time)
     
     return response
 
@@ -151,5 +156,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        log_level="info"
+        log_level="info",
+        access_log=False  # Disable uvicorn access logging
     )

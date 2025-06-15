@@ -53,9 +53,9 @@ class TagSearchEngine:
         # Clear existing data
         self.clear()
         
-        # Load all tags
+        # Load all tags except artist (type 1) and meta (type 5)
         result = await session.execute(
-            select(Tag).order_by(Tag.count.desc())
+            select(Tag).where(~Tag.type.in_([1, 5])).order_by(Tag.count.desc())
         )
         tags = result.scalars().all()
         
@@ -81,6 +81,10 @@ class TagSearchEngine:
         Args:
             tag_data: Tag dictionary from database
         """
+        # Skip artist tags (type 1) and meta tags (type 5)
+        if tag_data.get('type') in [1, 5]:
+            return
+            
         clean_tag = tag_data['tag'].lower()
         
         # Exact lookup
@@ -98,7 +102,7 @@ class TagSearchEngine:
         # Word indexing for intersection search
         words = clean_tag.split()
         for word in words:
-            if len(word) > 1:  # Skip single characters
+            if len(word) >= 3:  # Skip short words that cause bad matches
                 self.word_index[word].add(tag_data['tag'])
 
     def clear(self) -> None:
@@ -174,12 +178,20 @@ class TagSearchEngine:
         
         # Find tags containing ALL words
         matching_tags = None
+        word_debug = {}
         for word in words:
             word_tags = self.word_index.get(word, set())
+            word_debug[word] = len(word_tags)
             if matching_tags is None:
                 matching_tags = word_tags.copy()
             else:
                 matching_tags &= word_tags
+        
+        logger.debug("Word intersection search details", 
+                    query=query,
+                    words=words,
+                    word_matches=word_debug,
+                    intersection_count=len(matching_tags) if matching_tags else 0)
         
         if not matching_tags:
             return []
@@ -271,10 +283,11 @@ class TagSearchEngine:
         Internal method for fuzzy search with existing session
         """
         try:
-            # Use PostgreSQL similarity function with trigrams
+            # Use PostgreSQL similarity function with trigrams, excluding artist and meta tags
             result = await session.execute(
                 select(Tag.tag)
-                .where(func.similarity(Tag.tag, query) > 0.3)
+                .where(func.similarity(Tag.tag, query) > 0.5)
+                .where(~Tag.type.in_([1, 5]))
                 .order_by(func.similarity(Tag.tag, query).desc(), Tag.count.desc())
                 .limit(limit)
             )
@@ -301,10 +314,18 @@ class TagSearchEngine:
         
         # Calculate similarity scores for all tags
         candidates = []
+        total_checked = 0
         for tag_name in self.exact_tags.keys():
+            total_checked += 1
             score = fuzz.ratio(query, tag_name)
-            if score > 60:  # Minimum similarity threshold
+            if score > 75:  # Higher threshold to prevent bad matches
                 candidates.append((tag_name, score))
+        
+        logger.debug("Fuzzy memory search details",
+                    query=query,
+                    total_tags_checked=total_checked,
+                    candidates_found=len(candidates),
+                    threshold=75)
         
         # Sort by similarity score and popularity
         candidates.sort(key=lambda x: (-x[1], -self.exact_tags[x[0]]['count']))
@@ -337,37 +358,113 @@ class TagSearchEngine:
         # Normalize query
         normalized_query = self.normalize_query(query)
         if not normalized_query:
+            logger.debug("Empty query after normalization", original_query=query)
             return []
         
-        # Strategy 1: Exact match (fastest)
+        logger.info("Starting tag search", 
+                   original_query=query, 
+                   normalized_query=normalized_query,
+                   limit=limit)
+        print(f"[API] Starting tag search: '{query}' -> '{normalized_query}' (limit: {limit})")
+        
+        all_results = []
+        
+        # Strategy 1: Exact match (highest priority) - return immediately if found
         exact_match = await self.search_exact(normalized_query)
         if exact_match:
+            logger.info("Found exact match", 
+                       query=normalized_query, 
+                       match=exact_match,
+                       strategy="exact")
+            print(f"[API] Found exact match: '{exact_match}' - returning immediately")
             return [exact_match]
         
-        # Strategy 2: Alias lookup (fast)
+        # Strategy 2: Alias lookup (high priority)
         alias_match = await self.search_alias(normalized_query)
         if alias_match:
-            return [alias_match]
+            logger.info("Found alias match", 
+                       query=normalized_query, 
+                       match=alias_match,
+                       strategy="alias")
+            print(f"[API] Found alias match: '{alias_match}'")
+            all_results.append(('alias', [alias_match]))
         
-        # Strategy 3: Word intersection (medium)
-        word_matches = await self.search_word_intersection(normalized_query, limit)
-        if word_matches:
-            return word_matches[:limit]
-        
-        # Strategy 4: Prefix matching (medium)
+        # Strategy 3: Prefix matching (medium-high priority)
         prefix_matches = await self.search_prefix(normalized_query, limit)
         if prefix_matches:
-            return prefix_matches[:limit]
+            logger.info("Found prefix matches", 
+                       query=normalized_query, 
+                       matches=prefix_matches,
+                       count=len(prefix_matches),
+                       strategy="prefix")
+            print(f"[API] Found {len(prefix_matches)} prefix matches: {prefix_matches}")
+            all_results.append(('prefix', prefix_matches))
         
-        # Strategy 5: Fuzzy search (slow)
+        # Strategy 4: Word intersection (medium priority)
+        word_matches = await self.search_word_intersection(normalized_query, limit)
+        if word_matches:
+            logger.info("Found word intersection matches", 
+                       query=normalized_query, 
+                       matches=word_matches,
+                       count=len(word_matches),
+                       strategy="word_intersection")
+            print(f"[API] Found {len(word_matches)} word intersection matches: {word_matches}")
+            all_results.append(('word_intersection', word_matches))
+        
+        # Strategy 5: Database fuzzy search (low priority)
         if use_database_fallback and session:
             fuzzy_matches = await self.search_fuzzy_database(normalized_query, limit, session)
             if fuzzy_matches:
-                return fuzzy_matches[:limit]
+                logger.info("Found database fuzzy matches", 
+                           query=normalized_query, 
+                           matches=fuzzy_matches,
+                           count=len(fuzzy_matches),
+                           strategy="fuzzy_database")
+                print(f"[API] Found {len(fuzzy_matches)} database fuzzy matches: {fuzzy_matches}")
+                all_results.append(('fuzzy_database', fuzzy_matches))
         
-        # Fallback: In-memory fuzzy search
+        # Strategy 6: In-memory fuzzy search (lowest priority)
         memory_fuzzy_matches = await self.search_fuzzy_memory(normalized_query, limit)
-        return memory_fuzzy_matches[:limit]
+        if memory_fuzzy_matches:
+            logger.info("Found memory fuzzy matches", 
+                       query=normalized_query, 
+                       matches=memory_fuzzy_matches,
+                       count=len(memory_fuzzy_matches),
+                       strategy="fuzzy_memory")
+            print(f"[API] Found {len(memory_fuzzy_matches)} memory fuzzy matches: {memory_fuzzy_matches}")
+            all_results.append(('fuzzy_memory', memory_fuzzy_matches))
+        
+        # Combine and rank results by strategy priority
+        if not all_results:
+            print(f"[API] No results found for '{normalized_query}'")
+            return []
+        
+        # Priority order: exact > alias > prefix > word_intersection > fuzzy_database > fuzzy_memory
+        strategy_priority = {
+            'exact': 1,
+            'alias': 2, 
+            'prefix': 3,
+            'word_intersection': 4,
+            'fuzzy_database': 5,
+            'fuzzy_memory': 6
+        }
+        
+        # Combine all results, prioritizing by strategy
+        combined_results = []
+        for strategy, matches in sorted(all_results, key=lambda x: strategy_priority[x[0]]):
+            for match in matches:
+                if match not in combined_results:  # Avoid duplicates
+                    combined_results.append(match)
+                    if len(combined_results) >= limit:
+                        break
+            if len(combined_results) >= limit:
+                break
+        
+        strategies_used = [strategy for strategy, _ in all_results]
+        print(f"[API] Combined results from strategies: {strategies_used}")
+        print(f"[API] Final results: {combined_results}")
+        
+        return combined_results[:limit]
 
     def get_stats(self) -> dict:
         """

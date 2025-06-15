@@ -38,6 +38,10 @@ async def search_tag(
     5. Database fuzzy search (slowest)
     """
     try:
+        logger.info("Tag search request received", 
+                   query=request.query, 
+                   limit=request.limit)
+        
         # Perform search using the global search engine
         candidates = await search_engine.search(
             query=request.query,
@@ -46,10 +50,18 @@ async def search_tag(
             session=db
         )
         
-        return TagSearchResponse(
+        response = TagSearchResponse(
             query=request.query,
             candidates=candidates
         )
+        
+        logger.info("Tag search completed", 
+                   query=request.query,
+                   candidates_returned=len(candidates),
+                   candidates=candidates)
+        print(f"[API] Search completed for '{request.query}': {len(candidates)} candidates -> {candidates}")
+        
+        return response
         
     except Exception as e:
         logger.error("Tag search failed", query=request.query, error=str(e))
