@@ -1,8 +1,0 @@
-services:
-  db:
-    ports: !override
-      - "5466:5432"  # Replaces the original port mapping
-
-  api:
-    ports: !override
-      - "4136:8000"  # Replaces the original port mapping
