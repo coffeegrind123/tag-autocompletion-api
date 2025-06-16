@@ -34,5 +34,47 @@ services:
       - ./data:/app/data
     restart: unless-stopped
 
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:full-cuda
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./models:/models
+    shm_size: 8g
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --server
+      -m /models/Qwen3-0.6B.Q6_K.gguf
+      -c 32768
+      -ngl 28
+      --port 8080
+      --host 0.0.0.0
+      --threads 16
+      --temp 0.6
+      --top-p 0.95
+      --top-k 20
+      --repeat-penalty 1.1
+      --batch-size 4096
+      --ubatch-size 1024
+      --n-predict 32768
+      --parallel 8
+      --cont-batching
+      --flash-attn
+      --mlock
+      --verbose
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
 volumes:
   postgres_data:
