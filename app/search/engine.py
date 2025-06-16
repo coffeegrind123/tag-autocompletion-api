@@ -53,9 +53,9 @@ class TagSearchEngine:
         # Clear existing data
         self.clear()
         
-        # Load all tags except artist (type 1) and meta (type 5)
+        # Load all tags except artist (type 1), copyright (type 3), character (type 4), and meta (type 5)
         result = await session.execute(
-            select(Tag).where(~Tag.type.in_([1, 5])).order_by(Tag.count.desc())
+            select(Tag).where(~Tag.type.in_([1, 3, 4, 5])).order_by(Tag.count.desc())
         )
         tags = result.scalars().all()
         
@@ -81,8 +81,8 @@ class TagSearchEngine:
         Args:
             tag_data: Tag dictionary from database
         """
-        # Skip artist tags (type 1) and meta tags (type 5)
-        if tag_data.get('type') in [1, 5]:
+        # Skip artist tags (type 1), copyright tags (type 3), character tags (type 4), and meta tags (type 5)
+        if tag_data.get('type') in [1, 3, 4, 5]:
             return
             
         clean_tag = tag_data['tag'].lower()
@@ -283,11 +283,11 @@ class TagSearchEngine:
         Internal method for fuzzy search with existing session
         """
         try:
-            # Use PostgreSQL similarity function with trigrams, excluding artist and meta tags
+            # Use PostgreSQL similarity function with trigrams, excluding artist, copyright, character, and meta tags
             result = await session.execute(
                 select(Tag.tag)
-                .where(func.similarity(Tag.tag, query) > 0.5)
-                .where(~Tag.type.in_([1, 5]))
+                .where(func.similarity(Tag.tag, query) > 0.9)
+                .where(~Tag.type.in_([1, 3, 4, 5]))
                 .order_by(func.similarity(Tag.tag, query).desc(), Tag.count.desc())
                 .limit(limit)
             )
@@ -318,7 +318,7 @@ class TagSearchEngine:
         for tag_name in self.exact_tags.keys():
             total_checked += 1
             score = fuzz.ratio(query, tag_name)
-            if score > 75:  # Higher threshold to prevent bad matches
+            if score > 85:  # Much higher threshold to prevent bad matches
                 candidates.append((tag_name, score))
         
         logger.debug("Fuzzy memory search details",
@@ -411,33 +411,38 @@ class TagSearchEngine:
             print(f"[API] Found {len(word_matches)} word intersection matches: {word_matches}")
             all_results.append(('word_intersection', word_matches))
         
-        # Strategy 5: Database fuzzy search (low priority)
-        if use_database_fallback and session:
-            fuzzy_matches = await self.search_fuzzy_database(normalized_query, limit, session)
-            if fuzzy_matches:
-                logger.info("Found database fuzzy matches", 
-                           query=normalized_query, 
-                           matches=fuzzy_matches,
-                           count=len(fuzzy_matches),
-                           strategy="fuzzy_database")
-                print(f"[API] Found {len(fuzzy_matches)} database fuzzy matches: {fuzzy_matches}")
-                all_results.append(('fuzzy_database', fuzzy_matches))
+        # Strategy 5: Database fuzzy search (low priority) - DISABLED for now due to poor quality
+        # if use_database_fallback and session:
+        #     fuzzy_matches = await self.search_fuzzy_database(normalized_query, limit, session)
+        #     if fuzzy_matches:
+        #         logger.info("Found database fuzzy matches", 
+        #                    query=normalized_query, 
+        #                    matches=fuzzy_matches,
+        #                    count=len(fuzzy_matches),
+        #                    strategy="fuzzy_database")
+        #         print(f"[API] Found {len(fuzzy_matches)} database fuzzy matches: {fuzzy_matches}")
+        #         all_results.append(('fuzzy_database', fuzzy_matches))
         
-        # Strategy 6: In-memory fuzzy search (lowest priority)
-        memory_fuzzy_matches = await self.search_fuzzy_memory(normalized_query, limit)
-        if memory_fuzzy_matches:
-            logger.info("Found memory fuzzy matches", 
-                       query=normalized_query, 
-                       matches=memory_fuzzy_matches,
-                       count=len(memory_fuzzy_matches),
-                       strategy="fuzzy_memory")
-            print(f"[API] Found {len(memory_fuzzy_matches)} memory fuzzy matches: {memory_fuzzy_matches}")
-            all_results.append(('fuzzy_memory', memory_fuzzy_matches))
+        # Strategy 6: In-memory fuzzy search (lowest priority) - DISABLED for now due to poor quality
+        # memory_fuzzy_matches = await self.search_fuzzy_memory(normalized_query, limit)
+        # if memory_fuzzy_matches:
+        #     logger.info("Found memory fuzzy matches", 
+        #                query=normalized_query, 
+        #                matches=memory_fuzzy_matches,
+        #                count=len(memory_fuzzy_matches),
+        #                strategy="fuzzy_memory")
+        #     print(f"[API] Found {len(memory_fuzzy_matches)} memory fuzzy matches: {memory_fuzzy_matches}")
+        #     all_results.append(('fuzzy_memory', memory_fuzzy_matches))
         
         # Combine and rank results by strategy priority
         if not all_results:
             print(f"[API] No results found for '{normalized_query}'")
             return []
+        
+        # DEBUG: Log what each strategy returned
+        print(f"[API] DEBUG - All strategies for '{normalized_query}':")
+        for strategy, matches in all_results:
+            print(f"[API] DEBUG - {strategy}: {matches}")
         
         # Priority order: exact > alias > prefix > word_intersection > fuzzy_database > fuzzy_memory
         strategy_priority = {

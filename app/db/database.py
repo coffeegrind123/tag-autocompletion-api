@@ -16,7 +16,10 @@ DATABASE_URL = config(
 engine = create_async_engine(
     DATABASE_URL,
     echo=config('DB_ECHO', default=False, cast=bool),
-    poolclass=NullPool,  # For development; use proper pooling in production
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=30,
+    pool_recycle=3600,
     future=True
 )
 
